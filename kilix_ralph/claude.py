@@ -48,6 +48,7 @@ class ClaudeBridge:
                 self.ledger.store.db.execute("INSERT INTO claude_sessions VALUES (?,?,?)",
                     (target, self.session, json.dumps(self.settings)))
         self.process = None
+        self._process_waitable = False
         self.active = None
         self.acknowledged = False
         self.token = uuid.uuid4().hex
@@ -138,6 +139,54 @@ class ClaudeBridge:
             self.active = None
             self.token = uuid.uuid4().hex
 
+    def _provider_exited(self):
+        # WNOWAIT leaves even an exited leader reserved: its PID/PGID cannot
+        # be reused while the same-group descendants are still being stopped.
+        if not self._process_waitable or self.process.returncode is not None:
+            self._process_waitable = False
+            return True
+        try:
+            return os.waitid(os.P_PID, self.process.pid,
+                os.WEXITED | os.WNOHANG | os.WNOWAIT) is not None
+        except ChildProcessError:
+            # An outside waiter consumed the leader. Never signal its old PGID.
+            self._process_waitable = False
+            return True
+
+    def _signal_provider_group(self, sig):
+        self._provider_exited()
+        if not self._process_waitable:
+            return False
+        try:
+            os.killpg(self.process.pid, sig)
+        except ProcessLookupError:
+            return False
+        return True
+
+    def _stop_provider(self):
+        if not self.process:
+            return
+        try:
+            try:
+                self.process.stdin.close()
+            finally:
+                try:
+                    if self._signal_provider_group(signal.SIGTERM):
+                        # A leader's exit does not prove its helpers exited.
+                        # Keep it unreaped through the entire TERM grace.
+                        time.sleep(3)
+                finally:
+                    self._signal_provider_group(signal.SIGKILL)
+        finally:
+            self._process_waitable = False
+            try:
+                self.process.wait()
+            finally:
+                try:
+                    self.process.stdin.close()
+                finally:
+                    self.process.stdout.close()
+
     def serve(self, ready=None, stopping=lambda: False):
         with self.ledger.store.target_lock("claude-service:" + self.name):
             if self.endpoint.exists() or self.endpoint.is_symlink():
@@ -154,6 +203,7 @@ class ClaudeBridge:
                     self.process = subprocess.Popen(self.argv, cwd=self.cwd, stdin=subprocess.PIPE,
                         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, start_new_session=True,
                         preexec_fn=partial(parent_death, os.getpid()))
+                    self._process_waitable = True
                     os.set_blocking(self.process.stdout.fileno(), False)
                     os.set_blocking(self.process.stdin.fileno(), False)
                 adapter = [sys.executable, str(Path(__file__).with_name("adapter_entry.py")),
@@ -167,7 +217,7 @@ class ClaudeBridge:
                         selector.register(self.process.stdout, selectors.EVENT_READ, "output")
                     write_registered = False
                     while not stopping():
-                        if self.process and self.process.poll() is not None:
+                        if self.process and self._provider_exited():
                             self.blocked = "Claude exited; restart bridge to inspect preserved receipts"
                         if self.input and self.process and not write_registered and not self.blocked:
                             selector.register(self.process.stdin, selectors.EVENT_WRITE, "input")
@@ -229,19 +279,12 @@ class ClaudeBridge:
                                         self.blocked = str(exc)
                                         # Preserve the active receipt; never authorize another turn.
             finally:
-                listener.close()
-                if self.endpoint.exists():
-                    self.endpoint.unlink()
-                if self.process:
-                    self.process.stdin.close()
-                    if self.process.poll() is None:
-                        os.killpg(self.process.pid, signal.SIGTERM)
-                        try:
-                            self.process.wait(timeout=3)
-                        except subprocess.TimeoutExpired:
-                            os.killpg(self.process.pid, signal.SIGKILL)
-                    self.process.wait()
-                    self.process.stdout.close()
+                try:
+                    listener.close()
+                    if self.endpoint.exists():
+                        self.endpoint.unlink()
+                finally:
+                    self._stop_provider()
 
     def close(self):
         self.ledger.close()
