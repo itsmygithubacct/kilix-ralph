@@ -54,9 +54,18 @@ def rpc(argv, request, timeout=15):
                             result[name].extend(chunk)
                             if len(result[name]) > 131072:
                                 raise Error("adapter output exceeded 128 KiB")
-            process.wait(timeout=max(0.001, deadline - time.monotonic()))
-        if process.returncode:
-            raise Error(f"adapter exited {process.returncode}")
+            # Leave the leader waitable until group cleanup; reaping first can
+            # let its PID be reused before killpg. This module targets POSIX.
+            while True:
+                exited = os.waitid(os.P_PID, process.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+                if exited is not None:
+                    break
+                if time.monotonic() >= deadline:
+                    raise Error("adapter timed out")
+                time.sleep(min(0.01, max(0, deadline - time.monotonic())))
+        code = exited.si_status if exited.si_code == os.CLD_EXITED else -exited.si_status
+        if code:
+            raise Error(f"adapter exited {code}")
         response = json.loads(result["stdout"])
         if not isinstance(response, dict) or response.get("schema") != SCHEMA or response.get("target") != request["target"]:
             raise Error("adapter response has the wrong schema or conversation")
