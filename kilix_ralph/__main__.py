@@ -43,6 +43,16 @@ def parser():
     mode.add_argument("--mailbox", action="store_true")
     mode.add_argument("--adapter-command-json", help="JSON argv; first entry must be an absolute executable")
     ts.add_parser("list")
+    native = ts.add_parser("codex", help="bind a loaded Codex shared app-server thread")
+    native.add_argument("--target", required=True)
+    native.add_argument("--thread", required=True)
+    native.add_argument("--socket", type=Path)
+    claude = sub.add_parser("claude-serve", help="own a Claude streaming session with guarded input")
+    claude.add_argument("--target", required=True)
+    claude.add_argument("--cwd", type=Path, required=True)
+    claude.add_argument("--model", default="haiku")
+    claude.add_argument("--effort", choices=("low", "medium", "high"), default="low")
+    claude.add_argument("--dangerously-skip-permissions", action="store_true")
     for name in ("enqueue", "create"):
         cmd = sub.add_parser(name)
         cmd.add_argument("--target", required=True)
@@ -131,9 +141,29 @@ def service(store, args):
 
 def dispatch(store, args):
     cmd = args.command
+    if cmd == "claude-serve":
+        from .claude import ClaudeBridge
+        stopping = False
+        def stop(signum, frame):
+            nonlocal stopping
+            stopping = True
+        previous = {sig: signal.signal(sig, stop) for sig in (signal.SIGINT, signal.SIGTERM)}
+        bridge = None
+        try:
+            bridge = ClaudeBridge(store, args.target, args.cwd, args.model, args.effort, args.dangerously_skip_permissions)
+            bridge.serve(ready=emit, stopping=lambda: stopping)
+            return {"bridge": "stopped", "target": args.target}
+        finally:
+            if bridge:
+                bridge.close()
+            for sig, handler in previous.items():
+                signal.signal(sig, handler)
     if cmd == "target":
         if args.action == "list":
             return [store.target(row[0]) for row in store.db.execute("SELECT id FROM targets ORDER BY id")]
+        if args.action == "codex":
+            from .codex import bind, default_socket
+            return bind(store, args.target, args.thread, args.socket or default_socket())
         adapter = None if args.mailbox else json.loads(args.adapter_command_json)
         return store.add_target(args.target, adapter)
     if cmd == "enqueue":

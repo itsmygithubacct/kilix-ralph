@@ -1,27 +1,88 @@
 # kilix-ralph
 
 Durable one-shot messages and recurring follow-ups for agent conversations.
-Python 3.10+ and its standard library are the only runtime dependencies.
+The core requires Linux and Python 3.10+ with its standard library. Automatic
+provider paths additionally require the corresponding Codex or Claude CLI.
 
 Messages are ordered per recipient. A message remains pending until the
 recipient is ready for a new turn; completion of that turn releases the next
 message. Queue acceptance, delivery and task completion are separate facts.
 
-Two delivery modes are available:
+Three built-in delivery paths are available:
 
 - **Pull mailbox:** the recipient calls `receive --idle` at its own idle
   boundary, then reports acknowledgment and completion. No terminal text or
   keys are injected. This works without a background worker for one-shot mail.
-- **Guarded adapter:** a host worker calls a provider adapter that atomically
-  checks idle state and submits, then reconciles durable receipts. Adapters
-  must implement the [protocol](ADAPTER.md). There is no bundled Codex/Claude
-  terminal adapter: the current screen-check/Enter API cannot enforce this
-  guard. Registering a target does not attach to an existing TUI automatically.
+- **Codex shared app-server:** binds a loaded conversation and uses its native
+  idle queue. A competing human turn runs first; the message becomes a separate
+  turn afterward. The adapter never calls `turn/start` or `turn/steer` and never
+  injects keystrokes. Message IDs in turn history provide recovery evidence.
+- **Managed Claude streaming session:** Ralph owns a persistent input stream
+  and admits one message at a time. Exact user-message acknowledgment and a
+  session-bound result release the next message. Busy or stale idle tokens
+  cannot submit. This creates a managed session; it does not take over an
+  already-running interactive Claude terminal.
+
+Custom adapters can implement the [protocol](ADAPTER.md).
 
 The pull API is cooperative: `--idle` is the receiver's assertion, not an
-independent detector of application state. For an existing interactive agent,
-its harness must call it between turns. Ralph does not awaken a stock idle
-Codex or Claude terminal by itself in this version.
+independent detector of application state. A pull receiver must call it between
+turns. The two automatic paths above require no polling by the receiving agent.
+
+## Automatic Codex delivery
+
+Use the exact thread ID from the Codex session on its execution host:
+
+```sh
+kilix ralph target codex --target reviewer --thread THREAD_UUID
+kilix ralph serve
+# From another session on that host:
+kilix ralph enqueue --target reviewer --text "Please review the changes when idle."
+```
+
+The default endpoint is `$CODEX_HOME/app-server-control/app-server-control.sock`
+(with the usual `~/.codex` default). Select a different server with `--socket`.
+The adapter checks endpoint ownership and Unix peer credentials, then speaks
+WebSocket JSON-RPC over that local socket. The shared server must already own
+the thread; Ralph never resumes a second copy or changes its model/permissions.
+Codex sessions using an embedded server (`--no-daemon`) are not reachable here.
+
+This uses experimental native thread-queue methods, verified with Codex 0.161.0
+and a live 0.162.0 server. Unsupported methods fail closed. Ralph waits for idle
+before transferring a message; if a human turn wins that race, Codex's native
+queue waits for it to end. A draft in the terminal composer is never read,
+modified or submitted by Ralph. `provider_queued` means the provider owns the
+pending message, `accepted` identifies its actual turn, and `completed` means
+that turn ended. Completion evidence records failed/interrupted turns too;
+it does not prove that the requested task succeeded.
+
+## Automatic Claude delivery
+
+Run the managed session on the execution host:
+
+```sh
+kilix ralph claude-serve --target reviewer-claude --cwd /path/to/project \
+  --model haiku --effort low
+# In another terminal, run the shared queue worker:
+kilix ralph serve
+# Send from any session using the same host-local state:
+kilix ralph enqueue --target reviewer-claude --text "Review the latest changes."
+```
+
+Add `--dangerously-skip-permissions` when that mode is wanted. Settings and the
+generated Claude session ID are durably bound to the target. Repeating the same
+`claude-serve` command resumes a cleanly completed session. A previous unresolved
+turn blocks restart delivery rather than replaying it. The bridge reports its
+endpoint/session at startup; completed message status includes a bounded result
+excerpt. Native Claude configuration and permissions still apply. An approval
+or user-input wait never becomes an idle opportunity.
+
+Only the bridge writes this session's input. Human messages should also use the
+queue; do not independently resume the same Claude session concurrently. Closing
+the bridge stops its owned Claude process and preserves receipts. Closing a
+queue worker does not stop the bridge or a Codex session. For remote use, run
+these commands through authenticated SSH on the host; do not expose the local
+provider sockets as public listeners.
 
 ## Run
 
@@ -126,11 +187,17 @@ callers should invoke the host CLI through their authenticated transport.
 Limits: 64 KiB UTF-8 per message, 256 pending messages per recipient, 4096
 pending globally and 16 MiB total pending text. Overflow fails explicitly.
 Terminal receipts remain until explicitly pruned; prune removes only completed,
-cancelled and expired records. **Deduplication ends when a receipt is pruned.**
-Inspect and back up state before pruning if old operation IDs may be retried.
+cancelled and expired records. **Queue deduplication ends when a receipt is
+pruned.** Native provider ledgers under `providers/` retain their identity and
+recovery records separately and are not pruned automatically. Inspect and back
+up state before pruning if old operation IDs may be retried. Schema 2 migrates
+schema 1 on open; older Ralph binaries refuse it rather than skipping the new
+`provider_queued` state during rollback.
 
 ## Tests
 
-`make check` runs deterministic tests with private state directories and
-synthetic subprocess adapters. Tests do not invoke models, connect to real
-sessions, or type into terminals.
+`make check` runs deterministic tests with private state directories, synthetic
+subprocess adapters and, when `codex` is installed, isolated real app-servers
+connected to a loopback fake model. Set `RALPH_TEST_CODEX` to test a specific
+server binary. These tests do not invoke paid models, touch user sessions or
+type into terminals. Live Luna-low/Haiku-low smoke checks are separate.

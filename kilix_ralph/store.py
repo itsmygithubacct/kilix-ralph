@@ -26,7 +26,7 @@ class Busy(Error):
 
 
 ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:@-]{0,191}\Z")
-ACTIVE = ("queued", "delivering", "uncertain", "accepted")
+ACTIVE = ("queued", "delivering", "uncertain", "provider_queued", "accepted")
 TERMINAL = ("completed", "cancelled", "expired")
 MAX_TEXT = 65536
 
@@ -91,7 +91,7 @@ class Store:
         self.db.execute("PRAGMA synchronous=FULL")
         with self.transaction():
             version = self.db.execute("PRAGMA user_version").fetchone()[0]
-            if version not in (0, 1):
+            if version not in (0, 1, 2):
                 raise Error("unsupported queue schema; upgrade Ralph")
             for sql in (
                 "CREATE TABLE IF NOT EXISTS targets (id TEXT PRIMARY KEY, adapter TEXT NOT NULL)",
@@ -110,7 +110,7 @@ class Store:
                 "CREATE INDEX IF NOT EXISTS queue_order ON messages(target,status,seq)",
             ):
                 self.db.execute(sql)
-            self.db.execute("PRAGMA user_version=1")
+            self.db.execute("PRAGMA user_version=2")
         # Persist first creation of the database and WAL directory entries.
         fd = os.open(self.root, os.O_RDONLY | os.O_DIRECTORY)
         try:
@@ -191,8 +191,8 @@ class Store:
                 raise Error("message ID conflicts with a different immutable request")
             return message_id
         self._expire()
-        count, size = self.db.execute("SELECT COUNT(*), COALESCE(SUM(length(CAST(text AS BLOB))),0) FROM messages WHERE status IN ('queued','delivering','uncertain','accepted')").fetchone()
-        local = self.db.execute("SELECT COUNT(*) FROM messages WHERE target=? AND status IN ('queued','delivering','uncertain','accepted')", (target,)).fetchone()[0]
+        count, size = self.db.execute("SELECT COUNT(*), COALESCE(SUM(length(CAST(text AS BLOB))),0) FROM messages WHERE status IN ('queued','delivering','uncertain','provider_queued','accepted')").fetchone()
+        local = self.db.execute("SELECT COUNT(*) FROM messages WHERE target=? AND status IN ('queued','delivering','uncertain','provider_queued','accepted')", (target,)).fetchone()[0]
         if count >= 4096 or local >= 256 or size + len(text.encode()) > 16 * 1024 * 1024:
             raise QueueFull("queue full; message was not accepted")
         now = self.clock()
@@ -233,7 +233,7 @@ class Store:
             query += " AND target=?"
             params.append(target)
         if not history:
-            query += " AND status IN ('queued','delivering','uncertain','accepted')"
+            query += " AND status IN ('queued','delivering','uncertain','provider_queued','accepted')"
         return [self._row(r) for r in self.db.execute(query + " ORDER BY seq", params)]
 
     def _update(self, mid, status, reason, receipt=None):
@@ -253,25 +253,25 @@ class Store:
     def head(self, target):
         with self.transaction():
             self._expire()
-            row = self.db.execute("SELECT * FROM messages WHERE target=? AND status IN ('queued','delivering','uncertain','accepted') ORDER BY seq LIMIT 1", (target,)).fetchone()
+            row = self.db.execute("SELECT * FROM messages WHERE target=? AND status IN ('queued','delivering','uncertain','provider_queued','accepted') ORDER BY seq LIMIT 1", (target,)).fetchone()
         return self._row(row) if row else None
 
     def claim(self, mid):
         with self.transaction():
             self._expire()
             msg = self.message(mid)
-            first = self.db.execute("SELECT id FROM messages WHERE target=? AND status IN ('queued','delivering','uncertain','accepted') ORDER BY seq LIMIT 1", (msg["target"],)).fetchone()
+            first = self.db.execute("SELECT id FROM messages WHERE target=? AND status IN ('queued','delivering','uncertain','provider_queued','accepted') ORDER BY seq LIMIT 1", (msg["target"],)).fetchone()
             if msg["status"] != "queued" or first is None or first[0] != mid:
                 return False
             self._update(mid, "delivering", "durable intent; outcome not yet known")
             return True
 
     def outcome(self, mid, status, reason, receipt=None):
-        if status not in ("queued", "uncertain", "accepted", "completed"):
+        if status not in ("queued", "uncertain", "provider_queued", "accepted", "completed"):
             raise Error("invalid delivery outcome")
         with self.transaction():
             old = self.message(mid)
-            if old["status"] not in ("delivering", "uncertain", "accepted"):
+            if old["status"] not in ("delivering", "uncertain", "provider_queued", "accepted"):
                 raise Error("message has no in-flight delivery")
             if old["status"] == "accepted" and status != "completed":
                 raise Error("accepted delivery may only advance to completed")
@@ -356,7 +356,7 @@ class Store:
             if state in ("paused", "stopped"):
                 self.db.execute("UPDATE messages SET status='cancelled',reason=?,updated=? WHERE loop_id=? AND status='queued'", ("loop " + state, self.clock(), lid))
         result = self.loop(lid)
-        result["in_flight"] = [r[0] for r in self.db.execute("SELECT id FROM messages WHERE loop_id=? AND status IN ('delivering','uncertain','accepted')", (lid,))]
+        result["in_flight"] = [r[0] for r in self.db.execute("SELECT id FROM messages WHERE loop_id=? AND status IN ('delivering','uncertain','provider_queued','accepted')", (lid,))]
         return result
 
     def tick(self):
@@ -364,7 +364,7 @@ class Store:
         with self.transaction():
             self._expire()
             for row in self.db.execute("SELECT * FROM loops WHERE state='active' AND due<=? ORDER BY due,id", (self.clock(),)).fetchall():
-                if self.db.execute("SELECT 1 FROM messages WHERE loop_id=? AND status IN ('queued','delivering','uncertain','accepted')", (row["id"],)).fetchone():
+                if self.db.execute("SELECT 1 FROM messages WHERE loop_id=? AND status IN ('queued','delivering','uncertain','provider_queued','accepted')", (row["id"],)).fetchone():
                     continue
                 if row["max_wakes"] is not None and row["wakes"] >= row["max_wakes"]:
                     self.db.execute("UPDATE loops SET state='stopped' WHERE id=?", (row["id"],))

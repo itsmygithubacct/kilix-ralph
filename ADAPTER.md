@@ -62,6 +62,14 @@ This cannot be implemented by reading a screen and then sending Enter as a
 separate operation. Neither busy-session steering nor deferred input counts
 as idle-only submission. There is no opt-out flag that weakens this requirement.
 
+A provider-native queue is also valid when it guarantees a separate future
+turn and never steers a busy turn or consumes a terminal draft. In this path,
+`composer_empty: true` means no terminal composer is involved in the submission;
+it does not assert that every attached frontend has an empty draft. The native
+queue owns the final idle boundary if a competing turn invalidates the observed
+idle token. Codex's native thread queue uses this path. Ordinary application
+input buffered during a turn is not an equivalent guarantee.
+
 Possible responses include the schema, target and matching `operation_id`:
 
 - `status: "not_submitted", no_effects: true`: durable proof the operation
@@ -70,6 +78,9 @@ Possible responses include the schema, target and matching `operation_id`:
   elsewhere or a missing receipt alone cannot establish this proof.
 - `status: "accepted", evidence: {...}`: provider acceptance for a specific
   turn. Evidence must be nonempty and identify the provider receipt/turn.
+- `status: "provider_queued", evidence: {...}`: the provider or its exclusive
+  bridge owns the pending message; it has not yet been acknowledged as a turn.
+  This holds the recipient queue and requires reconciliation, not another send.
 - `status: "completed", evidence: {...}`: that accepted turn has ended, with
   provider evidence. This is not a claim that its task was successful.
 - `status: "uncertain"`: unknown outcome; hold the queue for reconciliation.
@@ -92,3 +103,18 @@ cannot release the next message. Adapter implementations must test human input
 races, provider restarts, accepted-but-response-lost, stale generations and
 completion evidence against their real provider. Capability flags are a
 contract assertion, not independent verification by Ralph.
+
+## Bundled providers
+
+`target codex` binds a loaded shared app-server thread. Native queue acceptance
+is reconciled through `clientUserMessageId` in the provider queue and `clientId`
+in full turn items. Payloads must also match exactly. Missing history, unloaded
+threads, failed pagination and lost receipts never authorize replay. The
+adapter does not resume threads or change model/approval settings.
+
+`claude-serve` owns a streaming-input CLI process and private local RPC socket.
+One writer guards the idle token, stores intent before input, verifies the
+replayed user message UUID/content/session, then waits for a bound result. A
+bridge restart with an unresolved receipt blocks delivery. It does not claim
+that a newly resumed process can determine whether a lost prior result occurred.
+Both built-ins keep provider receipts separately from prunable queue history.

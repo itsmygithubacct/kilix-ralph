@@ -2,4 +2,4 @@
 from .store import Error, Store
 
 __all__ = ["Error", "Store"]
-__version__ = "0.1.0"
+__version__ = "0.2.0"

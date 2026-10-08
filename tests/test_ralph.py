@@ -252,6 +252,30 @@ class QueueTests(unittest.TestCase):
         with self.assertRaises(Error):
             self.store.acknowledge(self.target, msg["id"], True)
 
+    def test_provider_queue_holds_recipient_and_cannot_expire(self):
+        first = self.send(ttl=1)
+        second = self.send("next")
+        self.assertTrue(self.store.claim(first["id"]))
+        self.store.outcome(first["id"], "provider_queued", "native queue receipt", {"native_id": "q1"})
+        self.now += 100
+        self.assertEqual(self.store.head(self.target)["id"], first["id"])
+        self.assertFalse(self.store.claim(second["id"]))
+        with self.assertRaises(Error):
+            self.store.cancel(first["id"])
+        self.store.outcome(first["id"], "accepted", "bound turn", {"turn": "t1"})
+        self.store.outcome(first["id"], "completed", "ended", {"turn": "t1"})
+        self.assertTrue(self.store.claim(second["id"]))
+
+    def test_schema_one_migrates_with_existing_messages(self):
+        first = self.send()
+        self.store.db.execute("PRAGMA user_version=1")
+        migrated = Store(self.root)
+        try:
+            self.assertEqual(migrated.db.execute("PRAGMA user_version").fetchone()[0], 2)
+            self.assertEqual(migrated.message(first["id"])["text"], "hello")
+        finally:
+            migrated.close()
+
 
 class AdapterTests(unittest.TestCase):
     def setUp(self):

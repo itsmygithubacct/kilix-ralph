@@ -104,10 +104,10 @@ class Worker:
             if message["status"] == "accepted":
                 raise Error("adapter lost previously accepted operation")
             self.store.outcome(mid, "queued", "adapter proved no submission; awaiting fresh idle", result)
-        elif status in ("accepted", "completed"):
+        elif status in ("provider_queued", "accepted", "completed"):
             if not isinstance(result.get("evidence"), dict) or not result["evidence"]:
                 raise Error("adapter omitted acceptance/completion evidence")
-            if status == "accepted" and message["status"] == "accepted":
+            if status == message["status"] and status in ("provider_queued", "accepted"):
                 return
             self.store.outcome(mid, status, "adapter reported " + status, result)
         elif status == "uncertain":
