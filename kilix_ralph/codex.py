@@ -62,8 +62,8 @@ class Codex:
         # Probe the experimental method before allowing any input.
         queue = list(self.pages("thread/queue/list"))
         state = info.get("status", {}).get("type", "unknown")
-        if state != "idle" or queue or info.get("canAcceptDirectInput") is False:
-            state = "waiting" if queue else state
+        if queue or (state == "idle" and info.get("canAcceptDirectInput") is False):
+            state = "waiting"
         token = hashlib.sha256(json.dumps([self.thread, info.get("updatedAt"), state]).encode()).hexdigest()
         return self.response(state=state, composer_empty=True, idle_token=token,
                              input_path="native-queue; no terminal composer consumed",
