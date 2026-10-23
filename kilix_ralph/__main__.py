@@ -108,10 +108,14 @@ def emit(value):
     print(json.dumps(value, ensure_ascii=False, sort_keys=True), flush=True)
 
 
-def service(store, args):
+def validate_poll(args):
     number(args.poll, "poll interval")
     if args.poll < 0.05:
         raise Error("poll interval must be at least 0.05 seconds")
+
+
+def service(store, args):
+    validate_poll(args)
     stopping = False
 
     def stop(signum, frame):
@@ -120,6 +124,7 @@ def service(store, args):
 
     previous = {sig: signal.signal(sig, stop) for sig in (signal.SIGTERM, signal.SIGINT)}
     worker = Worker(store)
+    previous_errors = set()
     try:
         while not stopping:
             if args.command == "run" and store.loop(args.loop_id)["state"] != "active":
@@ -127,6 +132,17 @@ def service(store, args):
             result = worker.once()
             if args.once:
                 return result
+            # Log changed failure identities only, never provider text or prompts.
+            errors = set()
+            for row in result["targets"]:
+                if "error" in row or row.get("status") == "uncertain":
+                    key = (row.get("target"), row.get("id"), row.get("status"))
+                    errors.add(key)
+                    if key not in previous_errors:
+                        print(json.dumps({"target": key[0], "id": key[1], "status": key[2],
+                            "error": "delivery requires inspection; query message status"}),
+                            file=sys.stderr, flush=True)
+            previous_errors = errors
             # No prompt content in continuous service logs.
             if result["generated"]:
                 emit({"generated": result["generated"]})
@@ -188,6 +204,7 @@ def dispatch(store, args):
     if cmd in ("pause", "resume", "stop"):
         return store.loop_state(args.loop_id, {"pause": "paused", "resume": "active", "stop": "stopped"}[cmd])
     if cmd in ("serve", "run"):
+        validate_poll(args)  # Validate before activating a persisted schedule.
         with store.target_lock("ralph:service"):
             if cmd == "run":
                 store.loop_state(args.loop_id, "active")

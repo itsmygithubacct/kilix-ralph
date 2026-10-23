@@ -101,7 +101,7 @@ class Worker:
             raise Error("receipt does not match delivery identity")
         # not_submitted is a durable proof of no side effects, not a timeout.
         if status == "not_submitted" and result.get("no_effects") is True:
-            if message["status"] == "accepted":
+            if message["status"] in ("provider_queued", "accepted"):
                 raise Error("adapter lost previously accepted operation")
             self.store.outcome(mid, "queued", "adapter proved no submission; awaiting fresh idle", result)
         elif status in ("provider_queued", "accepted", "completed"):
@@ -111,8 +111,9 @@ class Worker:
                 return
             self.store.outcome(mid, status, "adapter reported " + status, result)
         elif status == "uncertain":
-            if message["status"] != "accepted":
-                self.store.outcome(mid, "uncertain", "adapter could not reconcile delivery", result)
+            if message["status"] in ("provider_queued", "accepted"):
+                raise Error("adapter could not reconcile provider-owned delivery")
+            self.store.outcome(mid, "uncertain", "adapter could not reconcile delivery", result)
         else:
             raise Error("adapter returned an invalid delivery outcome")
 
@@ -150,10 +151,9 @@ class Worker:
             except Error as exc:
                 if msg["status"] == "queued":
                     self.store.pending_reason(msg["id"], str(exc))
-                elif msg["status"] != "accepted":
+                elif msg["status"] not in ("provider_queued", "accepted"):
                     self.store.outcome(msg["id"], "uncertain", str(exc))
-                else:
-                    return {"target": target, "status": "accepted", "id": msg["id"], "error": str(exc)}
+                return {**self.store.message(msg["id"]), "error": str(exc)}
             return self.store.message(msg["id"])
 
     def once(self):

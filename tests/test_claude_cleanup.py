@@ -133,8 +133,13 @@ class CleanupTests(unittest.TestCase):
         request = {"schema": SCHEMA, "target": bridge.target, "operation": "submit",
             "operation_id": "pending", "digest": "a" * 64, "sender": "session:sender",
             "text": "hello", "idle_token": bridge.token}
-        bridge.handle(request)
-        before = bridge.ledger.get(bridge.target, "pending")
+        before = None
+
+        def ready(_):
+            nonlocal before
+            bridge.handle(request)
+            before = bridge.ledger.get(bridge.target, "pending")
+
         deadline = time.monotonic() + 5
 
         def stopping():
@@ -143,7 +148,7 @@ class CleanupTests(unittest.TestCase):
 
         with patch("kilix_ralph.claude.time.sleep", side_effect=RuntimeError("injected grace failure")):
             with self.assertRaisesRegex(RuntimeError, "injected grace failure"):
-                bridge.serve(stopping=stopping)
+                bridge.serve(ready=ready, stopping=stopping)
         self.assert_child_killed()
         self.assertEqual(bridge.ledger.get(bridge.target, "pending"), before)
         self.assertIsNotNone(bridge.process.returncode)

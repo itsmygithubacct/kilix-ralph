@@ -201,3 +201,23 @@ subprocess adapters and, when `codex` is installed, isolated real app-servers
 connected to a loopback fake model. Set `RALPH_TEST_CODEX` to test a specific
 server binary. These tests do not invoke paid models, touch user sessions or
 type into terminals. Live Luna-low/Haiku-low smoke checks are separate.
+
+### Service diagnostics and restart admission
+
+A provider-owned queue receipt remains in flight when reconciliation fails or
+contradicts earlier custody. It cannot become cancellable or eligible for a new
+submit. Inspect `message status` and the provider ledger to resolve failures;
+absence of a receipt is not proof of no effects.
+
+Continuous workers report changed failure identities on stderr without prompt
+text, provider output or result excerpts. Repeated unchanged failures are
+coalesced until recovery. Detailed queue reasons remain available through
+`message status`. Provider stderr is discarded; bridge status reports a closed
+output stream or exited provider without retaining potentially sensitive output.
+Bridge restart admission and resume arguments are refreshed under its exclusive
+service lock. A pending prior turn blocks launch and preserves its receipts.
+
+Process-group cleanup covers helpers that remain in the owned group. Detached
+sessions and simultaneous bridge/provider death require external containment;
+this module does not claim that stronger boundary. Final group signaling is
+asynchronous, so return from cleanup alone is not proof of descendant exit.

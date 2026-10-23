@@ -55,17 +55,22 @@ class ClaudeBridge:
         self.output = bytearray()
         self.input = bytearray()
         self.blocked = None
-        old = self.ledger.store.db.execute("SELECT receipt FROM receipts WHERE target=?", (target,)).fetchall()
+        self._argv_override = argv
+        self._refresh_provider_state()
+
+    def _refresh_provider_state(self):
+        old = self.ledger.store.db.execute("SELECT receipt FROM receipts WHERE target=?", (self.target,)).fetchall()
+        self.blocked = None
         if any(not row[0] or json.loads(row[0]).get("status") != "completed" for row in old):
             self.blocked = "previous Claude turn is unresolved; receipts preserved, no replay"
         executable = shutil.which("claude")
-        if argv is None and not executable:
+        if self._argv_override is None and not executable:
             raise Error("claude executable not found")
-        self.argv = argv or [executable, "--print", "--input-format", "stream-json",
+        self.argv = self._argv_override or [executable, "--print", "--input-format", "stream-json",
             "--output-format", "stream-json", "--verbose", "--replay-user-messages",
-            "--model", model, "--effort", effort,
+            "--model", self.settings["model"], "--effort", self.settings["effort"],
             "--resume" if old else "--session-id", self.session]
-        if bypass and argv is None:
+        if self.settings["bypass"] and self._argv_override is None:
             self.argv.append("--dangerously-skip-permissions")
 
     def response(self, mid=None, **fields):
@@ -189,6 +194,9 @@ class ClaudeBridge:
 
     def serve(self, ready=None, stopping=lambda: False):
         with self.ledger.store.target_lock("claude-service:" + self.name):
+            # Construction may precede the previous owner's final receipt.
+            # Recompute restart admission and argv while ownership is exclusive.
+            self._refresh_provider_state()
             if self.endpoint.exists() or self.endpoint.is_symlink():
                 info = self.endpoint.lstat()
                 if not stat.S_ISSOCK(info.st_mode) or info.st_uid != os.getuid():

@@ -275,6 +275,8 @@ class Store:
                 raise Error("message has no in-flight delivery")
             if old["status"] == "accepted" and status != "completed":
                 raise Error("accepted delivery may only advance to completed")
+            if old["status"] == "provider_queued" and status not in ("provider_queued", "accepted", "completed"):
+                raise Error("provider-owned delivery cannot return to an unclaimed state")
             self._update(mid, status, reason, receipt)
             if status in ("accepted", "completed") and old["status"] not in ("accepted", "completed") and old["loop_id"]:
                 self.db.execute("UPDATE loops SET due=?+interval WHERE id=?", (self.clock(), old["loop_id"]))
