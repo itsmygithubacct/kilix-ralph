@@ -29,6 +29,47 @@ The pull API is cooperative: `--idle` is the receiver's assertion, not an
 independent detector of application state. A pull receiver must call it between
 turns. The two automatic paths above require no polling by the receiving agent.
 
+Ships in Plebian-OS 0.2.3 as a submodule of
+[Kilix](https://github.com/itsmygithubacct/kilix#readme)
+(`third_party/kilix-ralph`). Kilix exposes it as `kilix ralph`, which loads
+the pinned module without starting the terminal engine. No service is enabled
+at installation.
+
+## Quick start
+
+A pull mailbox needs no background worker. On the host where the receiving
+session runs:
+
+```sh
+kilix ralph target add --target codex:conversation-123:generation-1 --mailbox
+kilix ralph enqueue --target codex:conversation-123:generation-1 --text "Run the checks."
+# The receiver, at its own idle boundary:
+kilix ralph receive --target codex:conversation-123:generation-1 --idle
+kilix ralph ack MESSAGE_ID --target codex:conversation-123:generation-1
+kilix ralph complete MESSAGE_ID --target codex:conversation-123:generation-1
+```
+
+From a checkout, `python3 -m kilix_ralph` takes the same arguments, and
+installing the package provides `kilix-ralph`. Every result is JSON.
+
+## Usage
+
+| Command | What it does |
+|---|---|
+| `target add --target ID --mailbox` / `--adapter-command-json JSON` | Bind a pull mailbox or a guarded adapter to an immutable target |
+| `target codex --target ID --thread UUID [--socket PATH]` | Bind a loaded shared app-server thread |
+| `target list` | Registered targets |
+| `enqueue --target ID --text T\|--message-file F [--message-id ID] [--ttl S]` | Durably accept one message |
+| `receive --target ID --idle`, `ack ID`, `complete ID` | Pull receiver: claim, acknowledge, report completion |
+| `queue [--target ID] [--history]`, `message status\|cancel ID` | Inspect the queue; recover or cancel one message |
+| `create --target ID --interval S [--max-wakes N] [--loop-id L]` | A recurring follow-up, created paused |
+| `run L`, `status L`, `pause L`, `resume L`, `stop L`, `set-next L --expected-revision N` | Drive one loop |
+| `serve [--once]` | The worker for adapters and schedules; one per store |
+| `prune --older-than SECONDS` | Remove terminal receipts (their IDs stop deduplicating) |
+
+`--state-dir PATH` goes before the subcommand. The managed streaming-session
+bridge is described under the second automatic path below.
+
 ## Automatic Codex delivery
 
 Use the exact thread ID from the Codex session on its execution host:
@@ -84,115 +125,27 @@ queue worker does not stop the bridge or a Codex session. For remote use, run
 these commands through authenticated SSH on the host; do not expose the local
 provider sockets as public listeners.
 
-## Run
+## How it works
 
-From this checkout, use `python3 -m kilix_ralph`. Installing the package exposes
-`kilix-ralph`; the Kilix facade exposes the same arguments as `kilix ralph`.
-All results are JSON; errors go to stderr with a nonzero exit status.
-
-Register a stable conversation and generation identity on its execution host:
-
-```sh
-kilix ralph target add --target codex:conversation-123:generation-1 --mailbox
-kilix ralph enqueue --target codex:conversation-123:generation-1 \
-  --message-file request.txt --message-id request-42 --ttl 3600
-kilix ralph queue --target codex:conversation-123:generation-1 --json
+```
+ sender ──enqueue──> SQLite store (WAL, FULL sync, 0700)  $XDG_STATE_HOME/kilix/ralph
+                          │ one queue per recipient, head of line only
+          ┌───────────────┼──────────────────────────┐
+   pull: receive --idle   adapter (JSON argv,        native provider paths:
+   ack / complete         15 s, 128 KiB bounds)      shared app-server queue,
+                                                     managed streaming session
+                          │
+                 accepted ──> completed ──> next message released
 ```
 
-`enqueue` returns only after durable acceptance. Repeating an identical message
-ID/request returns its existing record. A conflicting payload, recipient,
-sender or TTL fails. Omit `--message-id` for a generated ID. Source provenance
-comes from the caller's PTY broker environment, or its local UID. The state
-directory belongs to one OS user; sender labels are not an authentication
-boundary between processes running as that same user.
-
-At the receiving harness's idle boundary:
-
-```sh
-kilix ralph receive --target codex:conversation-123:generation-1 --idle
-kilix ralph ack MESSAGE_ID --target codex:conversation-123:generation-1
-# Process the returned text as a message from the recorded sender.
-kilix ralph complete MESSAGE_ID --target codex:conversation-123:generation-1
-```
-
-Present messages as session-originated messages, not direct human instructions.
-Never infer permission escalation from their contents. A reply is a separate
-explicit enqueue to the sender's mailbox; there is no automatic reply loop.
-
-`receive` commits its claim before returning the text. A lost response holds
-the recipient's queue: inspect `message status MESSAGE_ID` to recover the
-original text and reconcile with the receiving harness. Repeating `receive`
-does not send it again. `ack` reports that the receiver accepted the message;
-`complete` reports that it finished the resulting turn. These are explicit
-receiver reports, not independent proof of successful task execution.
-
-## Recurring follow-ups
-
-```sh
-kilix ralph create --target codex:conversation-123:generation-1 \
-  --message-file next.txt --interval 60 --max-wakes 20 --loop-id review
-kilix ralph run review
-```
-
-Creation starts paused. `run` activates the loop and services the host queue
-in the foreground. It also services other active loops/registered adapters in
-the same state directory. For a long-lived worker use `kilix ralph serve`,
-then `kilix ralph resume review`. Only one service process runs per store.
-No service is enabled at installation or automatically resumed at boot.
-
-Mailboxes still require an idle receiver to pull the messages. `receive` also
-checks due schedules, so a polling receiver can operate without `serve`.
-Adapter enqueue refuses when no worker is running. In the event of a worker
-failure after acceptance, the durable queue survives until it is restarted.
-
-```sh
-kilix ralph status review --json
-kilix ralph set-next review --expected-revision 1 --message-file next.txt
-kilix ralph pause review
-kilix ralph resume review
-kilix ralph stop review
-```
-
-Revision checks prevent concurrent updates from overwriting each other. An
-update affects future wakes, never an already queued message. There is at most
-one outstanding wake per loop; missed intervals coalesce. After delivery the
-next wake is due one interval later, and must also await turn completion.
-`--max-wakes` counts scheduled wakes, including ones subsequently cancelled.
-
-Pause/stop cancel unclaimed wakes and report any already in flight. Stop is
-terminal for the loop and does not kill its agent. Resuming a paused loop
-starts a new interval. Stopping the worker preserves queue/loop state.
-
-## Recovery and retention
-
-```sh
-kilix ralph message status MESSAGE_ID --json
-kilix ralph message cancel MESSAGE_ID
-kilix ralph queue --history
-kilix ralph prune --older-than 2592000
-```
-
-Cancellation and TTL apply only before a delivery claim. In-flight or uncertain
-delivery cannot be recalled. An uncertain head message holds only its own
-recipient's queue. Recovery reconciles the same operation ID; it never blindly
-replays a submit. A provider may prove no effects and permit another guarded
-attempt with the same ID. Exactly-once effects inside an agent are not promised.
-
-State uses host-local SQLite with FULL synchronous WAL transactions and private
-permissions under `$XDG_STATE_HOME/kilix/ralph` (default
-`~/.local/state/kilix/ralph`). Override with `--state-dir PATH` before the
-subcommand. Use a local filesystem, not a shared network database. Remote
-callers should invoke the host CLI through their authenticated transport.
-
-Limits: 64 KiB UTF-8 per message, 256 pending messages per recipient, 4096
-pending globally and 16 MiB total pending text. Overflow fails explicitly.
-Terminal receipts remain until explicitly pruned; prune removes only completed,
-cancelled and expired records. **Queue deduplication ends when a receipt is
-pruned.** Native provider ledgers under `providers/` retain their identity and
-recovery records separately and are not pruned automatically. Inspect and back
-up state before pruning if old operation IDs may be retried. Schema 2 migrates
-schema 1 on open; older Ralph binaries refuse it rather than skipping the new
-`provider_queued` state during rollback.
+A message stays pending until its recipient is ready for a new turn, and
+completion of that turn releases the next one. Each step (accepted by the
+queue, claimed, acknowledged, completed) is a separate durable fact, so a lost
+response or a crashed worker leaves a record to reconcile rather than a blind
+resend. Loops add at most one outstanding wake each. The pull-mailbox details
+are in [docs/mailbox.md](docs/mailbox.md), loops in
+[docs/recurring.md](docs/recurring.md), and recovery, limits and pruning in
+[docs/recovery.md](docs/recovery.md).
 
 ## Tests
 
@@ -202,22 +155,34 @@ connected to a loopback fake model. Set `RALPH_TEST_CODEX` to test a specific
 server binary. These tests do not invoke paid models, touch user sessions or
 type into terminals. Live Luna-low/Haiku-low smoke checks are separate.
 
-### Service diagnostics and restart admission
+## Documentation
 
-A provider-owned queue receipt remains in flight when reconciliation fails or
-contradicts earlier custody. It cannot become cancellable or eligible for a new
-submit. Inspect `message status` and the provider ledger to resolve failures;
-absence of a receipt is not proof of no effects.
+| Document | Contents |
+|---|---|
+| [docs/mailbox.md](docs/mailbox.md) | Running the CLI, registering targets, enqueueing, pull receivers |
+| [docs/recurring.md](docs/recurring.md) | Recurring follow-ups: create, run, pause, update, stop |
+| [docs/recovery.md](docs/recovery.md) | Cancellation, recovery, state location, limits, pruning, service diagnostics |
+| [ADAPTER.md](ADAPTER.md) | The guarded delivery adapter protocol |
 
-Continuous workers report changed failure identities on stderr without prompt
-text, provider output or result excerpts. Repeated unchanged failures are
-coalesced until recovery. Detailed queue reasons remain available through
-`message status`. Provider stderr is discarded; bridge status reports a closed
-output stream or exited provider without retaining potentially sensitive output.
-Bridge restart admission and resume arguments are refreshed under its exclusive
-service lock. A pending prior turn blocks launch and preserves its receipts.
+## Related repositories
 
-Process-group cleanup covers helpers that remain in the owned group. Detached
-sessions and simultaneous bridge/provider death require external containment;
-this module does not claim that stronger boundary. Final group signaling is
-asynchronous, so return from cleanup alone is not proof of descendant exit.
+- [kilix](https://github.com/itsmygithubacct/kilix#readme): pins this module
+  and exposes it as `kilix ralph`.
+- [kitty-pty-broker](https://github.com/itsmygithubacct/kitty-pty-broker#readme):
+  its session environment is the sender provenance Ralph records.
+
+## Part of Plebian-OS
+
+kilix-ralph is one of the repositories behind
+[Plebian-OS](https://github.com/itsmygithubacct/plebian-os#readme), a Debian
+install whose desktop is [Kilix](https://github.com/itsmygithubacct/kilix#readme)
+running the [Kilix 95](https://github.com/itsmygithubacct/kilix-95#readme)
+desktop through [Pleb](https://github.com/itsmygithubacct/pleb#readme).
+It ships inside Kilix as the `third_party/kilix-ralph` submodule and is
+reached through `kilix ralph`. The map of every repository and how it ships
+is on the
+[components page](https://github.com/itsmygithubacct/plebian-os/blob/main/docs/components.md).
+
+## License
+
+MIT. See [LICENSE](LICENSE).
