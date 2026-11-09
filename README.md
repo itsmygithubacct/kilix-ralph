@@ -60,10 +60,10 @@ installing the package provides `kilix-ralph`. Every result is JSON.
 | `target codex --target ID --thread UUID [--socket PATH]` | Bind a loaded shared app-server thread |
 | `target list` | Registered targets |
 | `enqueue --target ID --text T\|--message-file F [--message-id ID] [--ttl S]` | Durably accept one message |
-| `receive --target ID --idle`, `ack ID`, `complete ID` | Pull receiver: claim, acknowledge, report completion |
+| `receive --target ID --idle`, `ack MSG --target ID`, `complete MSG --target ID` | Pull receiver: claim, acknowledge, report completion |
 | `queue [--target ID] [--history]`, `message status\|cancel ID` | Inspect the queue; recover or cancel one message |
-| `create --target ID --interval S [--max-wakes N] [--loop-id L]` | A recurring follow-up, created paused |
-| `run L`, `status L`, `pause L`, `resume L`, `stop L`, `set-next L --expected-revision N` | Drive one loop |
+| `create --target ID --text T\|--message-file F --interval S [--max-wakes N] [--loop-id L]` | A recurring follow-up, created paused |
+| `run L`, `status L`, `pause L`, `resume L`, `stop L`, `set-next L --expected-revision N --text T\|--message-file F` | Drive one loop |
 | `serve [--once]` | The worker for adapters and schedules; one per store |
 | `prune --older-than SECONDS` | Remove terminal receipts (their IDs stop deduplicating) |
 
